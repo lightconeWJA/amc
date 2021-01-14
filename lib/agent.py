@@ -35,6 +35,9 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
+    # 定义两个输入层，即fcl1与fcl2
+    # 这两层会同时输入到下一层
+    # 因此本critic中直接通过一个全连接层变成一个尺寸后加上去了
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300):
         super(Critic, self).__init__()
         self.fc11 = nn.Linear(nb_states, hidden1)
@@ -54,6 +57,10 @@ class Critic(nn.Module):
 
 
 class DDPG(object):
+    # nb_states 就是论文中定义的每层的state那包括一长串所对应的向量大小
+    # nb_actions 就是输出action所对应的向量大小，因为只有一个稀疏率，因此只为1
+    # args.hidden1 就是nn.Linear in_feartures参数，即输入张量的大小
+    # args.hidden2 就是out_features，输出张量大小
     def __init__(self, nb_states, nb_actions, args):
 
         self.nb_states = nb_states
@@ -137,6 +144,8 @@ class DDPG(object):
 
         q_batch = self.critic([to_tensor(state_batch), to_tensor(action_batch)])
 
+
+        # MSELoss
         value_loss = criterion(q_batch, target_q_batch)
         value_loss.backward()
         self.critic_optim.step()
@@ -179,12 +188,19 @@ class DDPG(object):
         # self.a_t = action
         return action
 
+    # s_t 就是网络中一个layer中的state_embedding
+    # 因此s_t可以作为actor网络的输入
     def select_action(self, s_t, episode):
         # assert episode >= self.warmup, 'Episode: {} warmup: {}'.format(episode, self.warmup)
+        # squeeze()可以删除但唯独条目，即把shape为1的维度去掉
         action = to_numpy(self.actor(to_tensor(np.array(s_t).reshape(1, -1)))).squeeze(0)
+
+        # 通过默认值为0.95的衰减率求得目前的delta作为截断正态分布的方差
         delta = self.init_delta * (self.delta_decay ** (episode - self.warmup))
         # action += self.is_training * max(self.epsilon, 0) * self.random_process.sample()
+        # 根据action与delta得到一个截断正态分布的采样，相当于有加入了一定的随机性
         action = self.sample_from_truncated_normal_distribution(lower=self.lbound, upper=self.rbound, mu=action, sigma=delta)
+        # 没必要吧，毕竟上一句已经能够限定范围了
         action = np.clip(action, self.lbound, self.rbound)
 
         # self.a_t = action
@@ -226,8 +242,14 @@ class DDPG(object):
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(param.data)
 
+
+    # truncnorm.rvs()是基于标准正态分布产生截断的正态分布
+    # 截断分布是限制x取值范围的一种分布
+    # 通俗来说就是根据x范围对正态分布砍几刀挑一块出来，之后通过变换使得总面积仍然为1
+    # lower = self.lbound = 0
+    # upper = self.rbound = 1
+    # mu = action = actor输出结果
+    # scipy.stats.truncnorm.rvs()可产生服从给定分布的一个样本，通过size指定输出数组大小
     def sample_from_truncated_normal_distribution(self, lower, upper, mu, sigma, size=1):
         from scipy import stats
         return stats.truncnorm.rvs((lower-mu)/sigma, (upper-mu)/sigma, loc=mu, scale=sigma, size=size)
-
-

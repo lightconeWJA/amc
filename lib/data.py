@@ -15,7 +15,7 @@ import numpy as np
 import os
 
 
-def get_dataset(dset_name, batch_size, n_worker, data_root='../../data'):
+def get_dataset(dset_name, batch_size, n_worker, data_root='../../../../../datasets/Imagenet2012'):
     cifar_tran_train = [
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -132,6 +132,12 @@ def get_split_dataset(dset_name, batch_size, n_worker, val_size, data_root='../d
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
         input_size = 224
+
+        # compose 会将一系列操作进行组合
+        # RandomResizedCrop 随机的进行裁剪，之后进行缩放为固定的input_size指定的大小
+        # RandomHorizontalFlip 以给定概率(50%)水平旋转
+        # ToTensor 顾名思义
+        # normalize 标准化/归一化
         train_transform = transforms.Compose([
                 transforms.RandomResizedCrop(input_size),
                 transforms.RandomHorizontalFlip(),

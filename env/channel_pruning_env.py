@@ -54,10 +54,15 @@ class ChannelPruningEnv:
         self._init_data()
 
         # build indexs
+        # 初始化可剪通道的网络模块对应索引的集合
+        # 同时初始化buffer_idx，即所有depthwise层对应索引的集合
         self._build_index()
+
+        # 此变量表示可剪通道的网络层的数目
         self.n_prunable_layer = len(self.prunable_idx)
 
         # extract information for preparing
+        # 针对每个prunable layer进行信息记录，输入输出记录/采样
         self._extract_layer_information()
 
         # build embedding (static part)
@@ -78,12 +83,21 @@ class ChannelPruningEnv:
 
         self.reward = eval(args.reward)
 
+        # 初始化：最优reward为负无穷，最优策略为空，最优维度为空
         self.best_reward = -math.inf
         self.best_strategy = None
         self.best_d_prime_list = None
 
+        # 初始化参数量，之前算过
         self.org_w_size = sum(self.wsize_list)
 
+    # 根据DDPG agent所选择的action进行一次模拟剪枝，并记录剪枝后的reward
+    # 并不会真的剪枝，记录好reward后便会恢复模型，只有在最后一次episode时候才会进行真正的剪枝
+    # 第一次使用此函数的上下文：
+    # self.cur_ind 在 resset() 中置为0
+    # self.strategy_dict 在_build_index()中变为{2: [1, 0.2], ... , 52:[0.2, 0.2], ..., 98:[0.2, 1]}形式
+    # self.prunable_idx 在 _build_index里已经存好了所有可prunable layer的index
+    # self.index_buffer 空的
     def step(self, action):
         # Pseudo prune and get the corresponding statistics. The real pruning happens till the end of all pseudo pruning
         if self.visited[self.cur_ind]:
@@ -155,6 +169,7 @@ class ChannelPruningEnv:
 
         return obs, reward, done, info_set
 
+
     def reset(self):
         # restore env by loading the checkpoint
         self.model.load_state_dict(self.checkpoint)
@@ -179,6 +194,11 @@ class ChannelPruningEnv:
     def set_export_path(self, path):
         self.export_path = path
 
+    
+    # action, d_prime, preserve_idx = self.prune_kernel(self.prunable_idx[self.cur_ind], action, preserve_idx)
+    # op_idx <-> self.prunable_idx[self.cur_ind]：调用此func时候处理的prunable layer的index
+    # action <-> preserve_ratio：actor网络输出的或者随机选取的压缩比
+    # preserve_idx <-> preserve_idx：
     def prune_kernel(self, op_idx, preserve_ratio, preserve_idx=None):
         '''Return the real ratio'''
         m_list = list(self.model.modules())
@@ -272,6 +292,12 @@ class ChannelPruningEnv:
 
         other_comp = 0
         this_comp = 0
+
+        # 这里self.layer_info_dict[idx]['flops'] 在_extract_layer_information()定义
+        # 并且其中包含了所有的 prunable_idx 与 buffer_idx 所有层的信息
+        # 包括 input_feat, output_feat, randx, randy, params, flops
+        # _extract_layer_information() 调用 new_forward()
+        # new_forward() 调用 measure_layer_for_pruning 对每个layer增加了flops与param两个成员
         for i, idx in enumerate(self.prunable_idx):
             flop = self.layer_info_dict[idx]['flops']
             buffer_flop = self._get_buffer_flops(idx)
@@ -297,6 +323,7 @@ class ChannelPruningEnv:
 
         return action
 
+    # 从buffer_index（即所有的深度分离卷积层）
     def _get_buffer_flops(self, idx):
         buffer_idx = self.buffer_dict[idx]
         buffer_flop = sum([self.layer_info_dict[_]['flops'] for _ in buffer_idx])
@@ -329,17 +356,35 @@ class ChannelPruningEnv:
         if self.use_real_val:  # use the real val set for eval, which is actually wrong
             print('*** USE REAL VALIDATION SET!')
 
+    # 定义一堆杂七杂八的dict，用于之后的剪通道操作
     def _build_index(self):
-        self.prunable_idx = []
-        self.prunable_ops = []
-        self.layer_type_dict = {}
+        self.prunable_idx = []      # 记录可剪枝网络模块所对应的索引号
+        self.prunable_ops = []      # 没用，记录prunable_idx对应的网络模块
+        self.layer_type_dict = {}   # 没用，可看作是上面两个变量合起来后的字典
         self.strategy_dict = {}
         self.buffer_dict = {}
         this_buffer_list = []
         self.org_channels = []
+
         # build index and the min strategy dict
+        # modules()会采用bfs(广度优先，即逐层遍历)方式返回所有网络的迭代器
+        # 结果中会有网络本身，网络的子模块，子模块的子模块......
+        # 和bfs略有不同的是，modules()只返回“模块级”的部分
+        # 意思是如果有完全相同的conv2D或者Linear，则只返回一次
+        # 此循环的任务就是找到最底层的子模块(可以理解为叶子节点)中只包含一个卷积层或全连接层的部分，找到后进行记录
+        # i 就是 idx，代表不同模块的编号
+        # m 就是不同的网络模块
         for i, m in enumerate(self.model.modules()):
+            # 本模型只负责2d卷积以及全连接
+            # 从prunable_layer_types定义可看出返回网络的种类定义规则
             if type(m) in self.prunable_layer_types:
+                # depth-wise(深度分离)卷积
+                # 当 gruops == in_channels，意味着每个输入channel都对应单独的一组滤波器
+                # 这时候就是深度分离卷积的情况，会将其单独放在buffer_idx中
+                # 针对其余卷积层与全连接层，会将其放入prunable_idx中，表示可剪通道
+                # 进行遍历的过程中，每遇到一个深度卷积就放进this_buffer_list中暂存
+                # 遍历到普通卷积或者全连接后，就将this_buffer_list中暂存的都作为此prunable layer的buffer
+                # 之后清空this_buffer_list
                 if type(m) == nn.Conv2d and m.groups == m.in_channels:  # depth-wise conv, buffer
                     this_buffer_list.append(i)
                 else:  # really prunable
@@ -347,6 +392,8 @@ class ChannelPruningEnv:
                     self.prunable_ops.append(m)
                     self.layer_type_dict[i] = type(m)
                     self.buffer_dict[i] = this_buffer_list
+                    # 清空this_buffer_list同时并不会影响buffer_dict()
+                    # 这时候咋又不出deep_copy之类的幺蛾子了......
                     this_buffer_list = []  # empty
                     self.org_channels.append(m.in_channels if type(m) == nn.Conv2d else m.in_features)
 
@@ -381,6 +428,7 @@ class ChannelPruningEnv:
         print('=> Initial min strategy dict: {}'.format(self.min_strategy_dict))
 
         # added for supporting residual connections during pruning
+        # 将所有可剪通道对应的网络模块ID的visited数组置为false，完成初始化
         self.visited = [False] * len(self.prunable_idx)
         self.index_buffer = {}
 
@@ -395,6 +443,12 @@ class ChannelPruningEnv:
         from lib.utils import measure_layer_for_pruning
 
         # extend the forward fn to record layer info
+        # 使用新成员 old_forward 来存放原来的forward函数
+        # 使用新成员 new_forward 来存放扩展过功能的forward函数
+        # 这里搞了个 new_forward 这么复杂的函数套函数是为了实现闭包
+        # 因为在改写forward过程中，必然会涉及到对新的forward外部作用域内变量的引用
+        # 上面一行所说的外部作用域的变量包括layer本身的成员
+        # 闭包每次运行是能记住引用的外部作用域的变量的值，正式我们需要的
         def new_forward(m):
             def lambda_forward(x):
                 m.input_feat = x.clone()
@@ -405,23 +459,29 @@ class ChannelPruningEnv:
 
             return lambda_forward
 
+        # 改写所有的conv2d与linear层的forward函数
         for idx in self.prunable_idx + self.buffer_idx:  # get all
             m = m_list[idx]
             m.old_forward = m.forward
             m.forward = new_forward(m)
 
-        # now let the image flow
         print('=> Extracting information...')
         with torch.no_grad():
-            for i_b, (input, target) in enumerate(self.train_loader):  # use image from train set
+            for i_b, (input, target) in enumerate(self.train_loader):
                 if i_b == self.n_calibration_batches:
                     break
                 self.data_saver.append((input.clone(), target.clone()))
                 input_var = torch.autograd.Variable(input).cuda()
 
                 # inference and collect stats
+                # 就是用input_var来过一遍模型 
+                # 并不关心输出
                 _ = self.model(input_var)
 
+                # 第一个batch的操作：
+                # 将layer_info_dict搞成一个二维dict
+                # 里面存prunable和buffer的参数量与计算量两个信息 
+                # 并用wsize_list和flops_list 分开再存一次
                 if i_b == 0:  # first batch
                     for idx in self.prunable_idx + self.buffer_idx:
                         self.layer_info_dict[idx] = dict()
@@ -429,22 +489,40 @@ class ChannelPruningEnv:
                         self.layer_info_dict[idx]['flops'] = m_list[idx].flops
                         self.wsize_list.append(m_list[idx].params)
                         self.flops_list.append(m_list[idx].flops)
+                
+                # 针对每个batch推理完成后，每一个prunable layer进行操作
                 for idx in self.prunable_idx:
+                    # 类型转换，就是提取出input feature与output feature
+                    # 这两个变量就是input与output的clone()结果
                     f_in_np = m_list[idx].input_feat.data.cpu().numpy()
                     f_out_np = m_list[idx].output_feat.data.cpu().numpy()
+
+                    # 针对当前层为卷积的情况
+                    # 对于第一个卷积层不做记录(此处待测试)
+                    # 对于“通常”的卷积层，直接存进layer_info_dict
                     if len(f_in_np.shape) == 4:  # conv
                         if self.prunable_idx.index(idx) == 0:  # first conv
                             f_in2save, f_out2save = None, None
                         elif m_list[idx].weight.size(3) > 1:  # normal conv
                             f_in2save, f_out2save = f_in_np, f_out_np
-                        else:  # 1x1 conv
+                        else:  
+                            # 1x1 conv
                             # assert f_out_np.shape[2] == f_in_np.shape[2]  # now support k=3
+                            # input格式: [N, C, H, W]
+                            # 针对1*1卷积进行的则是采样处理(总体数据量太大？)
+                            # n_points_per_layer的含义就是针对每个batch的每个特征图进行采样点的数量
+                            # randx与randy可以理解成每个采样点的横纵坐标
                             randx = np.random.randint(0, f_out_np.shape[2] - 0, self.n_points_per_layer)
                             randy = np.random.randint(0, f_out_np.shape[3] - 0, self.n_points_per_layer)
-                            # input: [N, C, H, W]
+
+                            # 顺便记录每个采样点的位置(我猜这个之后也不会再用)
                             self.layer_info_dict[idx][(i_b, 'randx')] = randx.copy()
                             self.layer_info_dict[idx][(i_b, 'randy')] = randy.copy()
 
+                            # 将每个batch摊平
+                            # 例如之前是[40, 32, 112, 112]，分别对应[N, C, H, W]
+                            # 采样后就会变成[40, 32, 10]，10 对应的就是 112*112 特征图中的采样点
+                            # 最后存储格式为[400, 32]，batchsize与采样数量合并
                             f_in2save = f_in_np[:, :, randx, randy].copy().transpose(0, 2, 1)\
                                 .reshape(self.batch_size * self.n_points_per_layer, -1)
 
@@ -462,6 +540,7 @@ class ChannelPruningEnv:
                             (self.layer_info_dict[idx]['input_feat'], f_in2save))
                         self.layer_info_dict[idx]['output_feat'] = np.vstack(
                             (self.layer_info_dict[idx]['output_feat'], f_out2save))
+
 
     def _regenerate_input_feature(self):
         # only re-generate the input feature
@@ -501,9 +580,25 @@ class ChannelPruningEnv:
                         self.layer_info_dict[idx]['input_feat'] = np.vstack(
                             (self.layer_info_dict[idx]['input_feat'], f_in2save))
 
+    # 顾名思义，我猜是确定强化学习中statues初始化相关的部分
+    # embedding格式：
+    # [
+    #   prunable_layer的index,
+    #   layer的类型(0是卷积，1是全连接)，
+    #   输入大小(in_features是全连接输入大小，in_channels是卷积输入通道数)，
+    #   输出大小(参考上面)，
+    #   每层的步长stride(当然全连接层没有，设定为0)，
+    #   每层的kernel_size(全连接层设定为1)，
+    #   本层的压缩率，
+    #   剩余的压缩率指标，
+    #   上一层的压缩率
+    # ]    
     def _build_state_embedding(self):
         # build the static part of the state embedding
+        # 函数内的临时变量，函数结束时会放进类成员中
         layer_embedding = []
+
+        # 又是对prunable layer的遍历过程
         module_list = list(self.model.modules())
         for i, ind in enumerate(self.prunable_idx):
             m = module_list[ind]

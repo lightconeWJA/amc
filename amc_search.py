@@ -24,14 +24,14 @@ def parse_args():
     # env
     parser.add_argument('--model', default='mobilenet', type=str, help='model to prune')
     parser.add_argument('--dataset', default='imagenet', type=str, help='dataset to use (cifar/imagenet)')
-    parser.add_argument('--data_root', default=None, type=str, help='dataset path')
+    parser.add_argument('--data_root', default='../../../../datasets/Imagenet2012', type=str, help='dataset path')
     parser.add_argument('--preserve_ratio', default=0.5, type=float, help='preserve ratio of the model')
     parser.add_argument('--lbound', default=0.2, type=float, help='minimum preserve ratio')
     parser.add_argument('--rbound', default=1., type=float, help='maximum preserve ratio')
     parser.add_argument('--reward', default='acc_reward', type=str, help='Setting the reward')
     parser.add_argument('--acc_metric', default='acc5', type=str, help='use acc1 or acc5')
     parser.add_argument('--use_real_val', dest='use_real_val', action='store_true')
-    parser.add_argument('--ckpt_path', default=None, type=str, help='manual path of checkpoint')
+    parser.add_argument('--ckpt_path', default='./checkpoints/mobilenet_imagenet.pth.tar', type=str, help='manual path of checkpoint')
     # parser.add_argument('--pruning_method', default='cp', type=str,
     #                     help='method to prune (fg/cp for fine-grained and channel pruning)')
     # only for channel pruning
@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument('--init_w', default=0.003, type=float, help='')
     parser.add_argument('--train_episode', default=800, type=int, help='train iters each timestep')
     parser.add_argument('--epsilon', default=50000, type=int, help='linear decay of exploration policy')
-    parser.add_argument('--seed', default=None, type=int, help='random seed to set')
+    parser.add_argument('--seed', default=2018, type=int, help='random seed to set')
     parser.add_argument('--n_gpu', default=1, type=int, help='number of gpu to use')
     parser.add_argument('--n_worker', default=16, type=int, help='number of data loader worker')
     parser.add_argument('--data_bsize', default=50, type=int, help='number of data batch size')
@@ -104,14 +104,27 @@ def train(num_episode, agent, env, output):
     step = episode = episode_steps = 0
     episode_reward = 0.
     observation = None
-    T = []  # trajectory
-    while episode < num_episode:  # counting based on episode
+
+    # trajectory，轨迹，即强化学习中即为策略梯度
+    T = []
+
+    # counting based on episode
+    # episode（情节）是agent（代理）在常规RL设置中与环境交互的完整动作。
+    # observation：处理当前layer的status_embedding
+    # observation2：下一个layer的status_embedding
+    while episode < num_episode:  
         # reset if it is the start of episode
+        # 开头重置所有参数
+        # 调用env.reset() 与 agent.reset() 重置
+        # 同时env.reset() 会返回prunable_layer第一个layer的state_embedding，即可作为actor网络的输入
         if observation is None:
             observation = deepcopy(env.reset())
             agent.reset(observation)
 
         # agent pick action ...
+        # warmup期间，agent并不会更新policy
+        # action随即范围是 [lbound, rbound) = [0, 1)
+        # 没有训练但只填填充策略梯度的“知识库”
         if episode <= args.warmup:
             action = agent.random_action()
             # action = sample_from_truncated_normal_distribution(lower=0., upper=1., mu=env.preserve_ratio, sigma=0.5)

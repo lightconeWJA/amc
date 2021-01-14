@@ -75,7 +75,7 @@ def accuracy(output, target, topk=(1,)):
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0)
+        correct_k = correct[:k].contiguous().view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res + appendices
 
@@ -92,11 +92,22 @@ def to_tensor(ndarray, requires_grad=False):  # return a float tensor by default
     return tensor.cuda() if torch.cuda.is_available() else tensor
 
 
+# 给每个需要purn的layer新添加两个成员flops和params
+# flops记录这一层的计算量
+# params记录这一层的参数量
 def measure_layer_for_pruning(layer, x):
+    # 将层名字提取出需要的部分
+    # 如'Conv2d(10, 20, kernel_size=(4, 4), stride=(1, 1))' 提取后变为 'Conv2d'
+    # 之后调用strip()去掉多余空格
+    # 当前情况下就只会返回 'Conv2d' 或者 'Linear'
     def get_layer_type(layer):
         layer_str = str(layer)
         return layer_str[:layer_str.find('(')].strip()
 
+    # model.parameters() 会返回遍历参数的迭代器
+    # 再通过 reduce() 则会得到每次迭代器对应的参数的数量
+    # 之后一个sum得到一整个layer的总参数量
+    # reduce 函数会对参数序列中的元素进行累积
     def get_layer_param(model):
         import operator
         import functools
@@ -116,6 +127,7 @@ def measure_layer_for_pruning(layer, x):
                     layer.kernel_size[1] * out_h * out_w / layer.groups * multi_add
         layer.params = get_layer_param(layer)
     # ops_linear
+    # numel() 返回数组中元素的个数
     elif type_name in ['Linear']:
         weight_ops = layer.weight.numel() * multi_add
         bias_ops = layer.bias.numel()
