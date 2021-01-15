@@ -245,11 +245,20 @@ class ChannelPruningEnv:
         self.extract_time += extract_t2 - extract_t1
         fit_t1 = time.time()
 
+        # preserve_idx 在 self.visited[self.cur_ind] == 0 时候 为 None
+        # 沿着维度C_in(输入通道数)进行sum操作
+        # np.argsort()会进行排序后返回排序的下标结果
+        # 这部分就是把weight沿着sum相加后最小的一部分channel给去掉
+        # 因为是 取绝对值->取反->排序，能保证去掉的都是绝对值的和最小的一部分
+        # 得到的preserve_idx就是拟剪枝后保留的这些通道
         if preserve_idx is None:  # not provided, generate new
             importance = np.abs(weight).sum((0, 2, 3))
             sorted_idx = np.argsort(-importance)  # sum magnitude along C_in, sort descend
             preserve_idx = sorted_idx[:d_prime]  # to preserve index
         assert len(preserve_idx) == d_prime
+        
+        # 根据保留的通道设定mask数组，一个通道对应一个元素
+        # 其中保留的部分设定为True，要剪的设定为false
         mask = np.zeros(weight.shape[1], bool)
         mask[preserve_idx] = True
 
