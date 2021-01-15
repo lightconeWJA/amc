@@ -196,13 +196,15 @@ class ChannelPruningEnv:
 
     
     # action, d_prime, preserve_idx = self.prune_kernel(self.prunable_idx[self.cur_ind], action, preserve_idx)
-    # op_idx <-> self.prunable_idx[self.cur_ind]：调用此func时候处理的prunable layer的index
+    # op_idx (operation index) <-> self.prunable_idx[self.cur_ind]：调用此func时候处理的prunable layer的index
     # action <-> preserve_ratio：actor网络输出的或者随机选取的压缩比
     # preserve_idx <-> preserve_idx：
     def prune_kernel(self, op_idx, preserve_ratio, preserve_idx=None):
         '''Return the real ratio'''
+        # 取得 operation index 所指代的需要裁剪的 layer，此函数中用 op 引用
         m_list = list(self.model.modules())
         op = m_list[op_idx]
+        
         assert (preserve_ratio <= 1.)
 
         if preserve_ratio == 1:  # do not prune
@@ -211,11 +213,18 @@ class ChannelPruningEnv:
             # mask = np.ones([c], dtype=bool)
 
         def format_rank(x):
-            rank = int(np.around(x))
+            rank = int(np.around(x)) # 四舍五入
             return max(rank, 1)
 
+        # 例如一个 op 为 Conv2d(32, 64, kernel_size=(1, 1), stride=(1, 1), bias=False)
+        # 那么 op.weight.shape = [64, 32, 1, 1] 即为 [N, C, H, W]
         n, c = op.weight.size(0), op.weight.size(1)
+
+        # 计算压缩后 卷积核的channel数量，并保证了一定大于1
         d_prime = format_rank(c * preserve_ratio)
+
+        # np.ceil() 向上取整, np.floor() 向下取整
+        # 即把 d_prime 搞成channel_round的整数倍，且保证d_prime <= c
         d_prime = int(np.ceil(d_prime * 1. / self.channel_round) * self.channel_round)
         if d_prime > c:
             d_prime = int(np.floor(c * 1. / self.channel_round) * self.channel_round)
@@ -231,7 +240,7 @@ class ChannelPruningEnv:
         op_type = 'Conv2D'
         if len(weight.shape) == 2:
             op_type = 'Linear'
-            weight = weight[:, :, None, None]
+            weight = weight[:, :, None, None] # [out, in] 变成了 [out, in, 1, 1]
         extract_t2 = time.time()
         self.extract_time += extract_t2 - extract_t1
         fit_t1 = time.time()
@@ -285,11 +294,15 @@ class ChannelPruningEnv:
         return self.cur_ind == len(self.prunable_idx) - 1
 
     def _action_wall(self, action):
+        # self.startegy 负责储存每个episode中每一个prunable layer的preserve ratio
+        # 因此这个列表的长度应该和 cur_ind应该同时更新并保持一致
         assert len(self.strategy) == self.cur_ind
 
         action = float(action)
         action = np.clip(action, 0, 1)
 
+        # this_comp（this prunable layer compression） 为遍历中的 prunable layer 的flops
+        # other_comp 为除了this_comp 对应的层外其他的层的flops之和
         other_comp = 0
         this_comp = 0
 
@@ -302,6 +315,7 @@ class ChannelPruningEnv:
             flop = self.layer_info_dict[idx]['flops']
             buffer_flop = self._get_buffer_flops(idx)
 
+            # 针对不同layer所处位置的不同情况计算 this_comp 和 other_comp
             if i == self.cur_ind - 1:  # TODO: add other member in the set
                 this_comp += flop * self.strategy_dict[idx][0]
                 # add buffer (but not influenced by ratio)
@@ -323,7 +337,8 @@ class ChannelPruningEnv:
 
         return action
 
-    # 从buffer_index（即所有的深度分离卷积层）
+    # 从buffer_dict中取得某个prunable layer的所有buffer layer
+    # 之后对所有的buffer layer 的 flops 求和并返回
     def _get_buffer_flops(self, idx):
         buffer_idx = self.buffer_dict[idx]
         buffer_flop = sum([self.layer_info_dict[_]['flops'] for _ in buffer_idx])
@@ -357,11 +372,14 @@ class ChannelPruningEnv:
             print('*** USE REAL VALIDATION SET!')
 
     # 定义一堆杂七杂八的dict，用于之后的剪通道操作
+    # strategy_dict 作为一个字典
+    # 以prunalbe layer 的 index 作为 key
+    # 以prunable layer 的输入输出的“保留值”（即裁剪后还留多少）的list[输入保留， 输出保留] 作为value
     def _build_index(self):
         self.prunable_idx = []      # 记录可剪枝网络模块所对应的索引号
         self.prunable_ops = []      # 没用，记录prunable_idx对应的网络模块
         self.layer_type_dict = {}   # 没用，可看作是上面两个变量合起来后的字典
-        self.strategy_dict = {}
+        self.strategy_dict = {}     
         self.buffer_dict = {}
         this_buffer_list = []
         self.org_channels = []
