@@ -123,7 +123,7 @@ def train(num_episode, agent, env, output):
 
         # agent pick action ...
         # warmup期间，agent并不会更新policy
-        # action随即范围是 [lbound, rbound) = [0, 1)
+        # action随机范围是 [lbound, rbound) = [0, 1)
         # 没有训练但只填填充策略梯度的“知识库”
         if episode <= args.warmup:
             action = agent.random_action()

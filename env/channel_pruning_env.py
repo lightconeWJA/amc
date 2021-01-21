@@ -229,6 +229,10 @@ class ChannelPruningEnv:
         if d_prime > c:
             d_prime = int(np.floor(c * 1. / self.channel_round) * self.channel_round)
 
+        # 提取信息
+        # X：op_idx对应layer的input_feat
+        # Y：op_idx对应layer的output_feat
+        # weight：op_idx对应layer的weight，用于挑选需要剪的通道
         extract_t1 = time.time()
         if self.use_new_input:  # this is slow and may lead to overfitting
             self._regenerate_input_feature()
@@ -263,6 +267,11 @@ class ChannelPruningEnv:
         mask[preserve_idx] = True
 
         # reconstruct, X, Y <= [N, C]
+        # 进行剪枝后使用线性回归对参数进行重新调整
+        # 根据之前new_forward()所记录的'input_feat' 与 'output_feat' 
+        # 来对模拟剪通道以后的layer进行初步调整来尽量模拟之前的输入输出的函数
+        # conv情况 [C_out, C_in, ksize, ksize]，ksize == 1
+        # fc情况 [C_out, C_in, 1, 1]
         masked_X = X[:, mask]
         if weight.shape[2] == 1:  # 1x1 conv or fc
             from lib.utils import least_square_sklearn
@@ -271,19 +280,41 @@ class ChannelPruningEnv:
             rec_weight = np.transpose(rec_weight, (0, 3, 1, 2))  # (C_out, C_in', K_h, K_w)
         else:
             raise NotImplementedError('Current code only supports 1x1 conv now!')
+        # 一个episode走下来后每层对应的rec_weight.shape差不多是这个鸟样：
+        # (64, 8, 1, 1)
+        # (128, 24, 1, 1)
+        # (128, 112, 1, 1)
+        # (256, 104, 1, 1)
+        # (256, 112, 1, 1)
+        # (512, 112, 1, 1)
+        # (512, 104, 1, 1)
+        # (512, 216, 1, 1)
+        # (512, 440, 1, 1)
+        # (512, 296, 1, 1)
+        # (512, 216, 1, 1)
+        # (1024, 144, 1, 1)
+        # (1024, 848, 1, 1)
+        # (1000, 944, 1, 1)
+        
+        # 参数默认情况下会执行
+        # 相当于将需要裁剪的所有通道的权重变为0
         if not self.export_model:  # pad, pseudo compress
-            rec_weight_pad = np.zeros_like(weight)
+            rec_weight_pad = np.zeros_like(weight) # 搞一个和weight相同shape的全0矩阵
             rec_weight_pad[:, mask, :, :] = rec_weight
             rec_weight = rec_weight_pad
 
+        # 针对fc层重新变回正确的shape
         if op_type == 'Linear':
             rec_weight = rec_weight.squeeze()
             assert len(rec_weight.shape) == 2
+        
         fit_t2 = time.time()
         self.fit_time += fit_t2 - fit_t1
         # now assign
         op.weight.data = torch.from_numpy(rec_weight).cuda()
         action = np.sum(mask) * 1. / len(mask)  # calculate the ratio
+
+        # 这部分暂时不用看
         if self.export_model:  # prune previous buffer ops
             prev_idx = self.prunable_idx[self.prunable_idx.index(op_idx) - 1]
             for idx in range(prev_idx, op_idx):
@@ -297,6 +328,7 @@ class ChannelPruningEnv:
                     m.bias.data = torch.from_numpy(m.bias.data.cpu().numpy()[mask]).cuda()
                     m.running_mean.data = torch.from_numpy(m.running_mean.data.cpu().numpy()[mask]).cuda()
                     m.running_var.data = torch.from_numpy(m.running_var.data.cpu().numpy()[mask]).cuda()
+        
         return action, d_prime, preserve_idx
 
     def _is_final_layer(self):
@@ -525,7 +557,7 @@ class ChannelPruningEnv:
                     f_out_np = m_list[idx].output_feat.data.cpu().numpy()
 
                     # 针对当前层为卷积的情况
-                    # 对于第一个卷积层不做记录(此处待测试)
+                    # 对于第一个卷积层不做记录，因为第一层需要保留原通道保证正常输入
                     # 对于“通常”的卷积层，直接存进layer_info_dict
                     if len(f_in_np.shape) == 4:  # conv
                         if self.prunable_idx.index(idx) == 0:  # first conv
@@ -549,6 +581,7 @@ class ChannelPruningEnv:
                             # 将每个batch摊平
                             # 例如之前是[40, 32, 112, 112]，分别对应[N, C, H, W]
                             # 采样后就会变成[40, 32, 10]，10 对应的就是 112*112 特征图中的采样点
+                            # 当然在剪mobilenetV1过程中，剪的是 kernel = 1*1
                             # 最后存储格式为[400, 32]，batchsize与采样数量合并
                             f_in2save = f_in_np[:, :, randx, randy].copy().transpose(0, 2, 1)\
                                 .reshape(self.batch_size * self.n_points_per_layer, -1)
