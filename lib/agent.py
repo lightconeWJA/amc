@@ -116,10 +116,28 @@ class DDPG(object):
 
     def update_policy(self):
         # Sample batch
+        # 以一个batch大小为单位对actor与critic进行训练
+        # 以下'xxx_batch'都代表一个batch大小内的训练用数据
+        # state_batch：输入进actor网络用于输出action_t的state数据
+        # action_batch：actor网络输出的的action_t数据
+        # reward_batch：与action_t相对应的reward
+        # next_state_batch：state_batch 对应状态采取 action_batch对应动作后进入的新状态
+        # terminal_batch
         state_batch, action_batch, reward_batch, \
         next_state_batch, terminal_batch = self.memory.sample_and_split(self.batch_size)
 
         # normalize the reward
+        # 使用 moving average 滑动平均进行归一化
+        # 这样即可保证平均结果可以很平滑的从上次平均结果过渡到本次平均结果，即平滑过滤
+        # 可以防止周期性的干扰，在波动频率很高的场合也能取得很平滑的滤波效果
+        # 以下为原公式到变形为具体实现的推导过程
+        # 等号左边的moving_average为更新后的，右边的为更新前的
+        # moving_average = (1 - moving_alpha) * moving_average + moving_alpha * batch_mean_reward
+        # <==> (这是“等价于”符号)
+        # moving_average = moving_average + moving_alpha * (batch_mean_reward - moving_average)
+        # <==>
+        # self.moving_average += self.moving_alpha * (batch_mean_reward - self.moving_average)
+        # 使用 reward_batch -= self.moving_average 就是为了避免Q值过于偏大，使得更新权重有正有负
         batch_mean_reward = np.mean(reward_batch)
         if self.moving_average is None:
             self.moving_average = batch_mean_reward
@@ -232,12 +250,14 @@ class DDPG(object):
             '{}/critic.pkl'.format(output)
         )
 
+    # 将source的参数以tau的比例复制给target
     def soft_update(self, target, source):
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(
                 target_param.data * (1.0 - self.tau) + param.data * self.tau
             )
 
+    # 直接将source的参数原样复制给target
     def hard_update(self, target, source):
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(param.data)

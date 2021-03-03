@@ -132,6 +132,7 @@ def train(num_episode, agent, env, output):
             action = agent.select_action(observation, episode=episode)
 
         # env response with next_observation, reward, terminate_info
+        # 使用step处理
         observation2, reward, done, info = env.step(action)
         observation2 = deepcopy(observation2)
 
@@ -160,8 +161,13 @@ def train(num_episode, agent, env, output):
                                                                                  info['accuracy'],
                                                                                  info['compress_ratio']))
             final_reward = T[-1][0]
-            # print('final_reward: {}'.format(final_reward))
+            print('final_reward: {}'.format(final_reward))
             # agent observe and update policy
+            # r_t：reward
+            # s_t：observation
+            # s_t1：observation2
+            # a_t：action
+            # done：done
             for r_t, s_t, s_t1, a_t, done in T:
                 agent.observe(final_reward, s_t, s_t1, a_t, done)
                 if episode > args.warmup:
@@ -249,6 +255,8 @@ if __name__ == "__main__":
         nb_actions = 1  # just 1 action here
 
         args.rmsize = args.rmsize * len(env.prunable_idx)  # for each layer
+        # 参考输出：
+        # ** Actual replay buffer size: 1500
         print('** Actual replay buffer size: {}'.format(args.rmsize))
 
         agent = DDPG(nb_states, nb_actions, args)

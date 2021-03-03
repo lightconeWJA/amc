@@ -108,8 +108,15 @@ class ChannelPruningEnv:
             preserve_idx = None
 
         # prune and update action
+        # 调用完成后，对应的layer的weight已经经过剪枝
+        # 通道被剪部分对应权重已经变为0
+        # 返回
+        #   action：本层对应的压缩率    
+        #   d_prime：被压缩的通道，压缩后的通道数
+        #   preserve_idx：保留的这些个通道
         action, d_prime, preserve_idx = self.prune_kernel(self.prunable_idx[self.cur_ind], action, preserve_idx)
 
+        # 这部分不会执行，因为self.shared_idx永远是空的
         if not self.visited[self.cur_ind]:
             for group in self.shared_idx:
                 if self.cur_ind in group:  # set the shared ones
@@ -119,9 +126,11 @@ class ChannelPruningEnv:
                         self.visited[g_idx] = True
                         self.index_buffer[g_idx] = preserve_idx.copy()
 
+        # 要想看看更多的信息其实 if ture: 也行
         if self.export_model:  # export checkpoint
             print('# Pruning {}: ratio: {}, d_prime: {}'.format(self.cur_ind, action, d_prime))
 
+        # 保存本层的压缩率与保留的通道数
         self.strategy.append(action)  # save action to strategy
         self.d_prime_list.append(d_prime)
 
@@ -220,7 +229,7 @@ class ChannelPruningEnv:
         # 那么 op.weight.shape = [64, 32, 1, 1] 即为 [N, C, H, W]
         n, c = op.weight.size(0), op.weight.size(1)
 
-        # 计算压缩后 卷积核的channel数量，并保证了一定大于1
+        # 计算压缩后卷积核的channel数量，并保证了一定大于1
         d_prime = format_rank(c * preserve_ratio)
 
         # np.ceil() 向上取整, np.floor() 向下取整

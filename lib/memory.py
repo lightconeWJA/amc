@@ -36,12 +36,16 @@ def sample_batch_indexes(low, high, size):
     return batch_idxs
 
 
+# 一个相对简单的环形缓存
+# 存满了以后新数据直接覆盖旧的
+# 比dequeu更好的支持随机访问
 class RingBuffer(object):
+    # maxlen 就是 limit， 就是 args.rmsize * len(env.prunable_idx) 得到的那玩意儿
     def __init__(self, maxlen):
         self.maxlen = maxlen
         self.start = 0
         self.length = 0
-        self.data = [None for _ in range(maxlen)]
+        self.data = [None for _ in range(maxlen)] # maxlen大小的空list
 
     def __len__(self):
         return self.length
@@ -78,8 +82,8 @@ def zeroed_observation(observation):
 
 class Memory(object):
     def __init__(self, window_length, ignore_episode_boundaries=False):
-        self.window_length = window_length
-        self.ignore_episode_boundaries = ignore_episode_boundaries
+        self.window_length = window_length # 默认值为1，没变过
+        self.ignore_episode_boundaries = ignore_episode_boundaries # 默认为False
 
         self.recent_observations = deque(maxlen=window_length)
         self.recent_terminals = deque(maxlen=window_length)
@@ -120,11 +124,16 @@ class Memory(object):
 class SequentialMemory(Memory):
     def __init__(self, limit, **kwargs):
         super(SequentialMemory, self).__init__(**kwargs)
-
+        # limit 就是 args.rmsize = args.rmsize * len(env.prunable_idx)
+        # 这句话所得到的 real args.rmsize ring_memory_size
+        # 针对每个prunable layer 都有100(在args中指定)大小的缓存空间
         self.limit = limit
 
         # Do not use deque to implement the memory. This data structure may seem convenient but
         # it is way too slow on random access. Instead, we use our own ring buffer implementation.
+        # 这里作者自己写个了数据结构当缓存，因为deque太慢
+        # RingBuffer顾名思义就是个唤醒缓存，较好的支持了随机访问，且新数据直接覆盖旧数据
+        # 初始化参数limit指定的是缓存大小
         self.actions = RingBuffer(limit)
         self.rewards = RingBuffer(limit)
         self.terminals = RingBuffer(limit)
